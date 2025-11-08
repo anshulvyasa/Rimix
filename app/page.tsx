@@ -8,29 +8,27 @@ import {
   Timer, Watch, FolderOpen, Music, Volume2, Sun,
   Moon, Cloud, CloudRain, CloudSnow, CloudDrizzle
 } from 'lucide-react';
+import { startVoiceRecognition } from '@/lib/speech';
+import { extractTextFromFile, extractReminderFromText } from '@/lib/fileUpload';
+import { alarmInstance } from '@/lib/alarm';
 
-// Sample dummy data
-const initialReminders = [
-  { id: 1, title: 'Team Meeting', description: 'Weekly sync with design team', date: '2023-09-15', time: '10:30', completed: false, priority: 'high', category: 'Work' },
-  { id: 2, title: 'Gym Session', description: 'Leg day workout', date: '2023-09-14', time: '18:00', completed: false, priority: 'medium', category: 'Health' },
-  { id: 3, title: 'Mom\'s Birthday', description: 'Call mom for her birthday', date: '2023-09-20', time: '09:00', completed: false, priority: 'high', category: 'Personal' },
-  { id: 4, title: 'Project Deadline', description: 'Submit final project documentation', date: '2023-09-18', time: '16:00', completed: false, priority: 'high', category: 'Work' },
-  { id: 5, title: 'Dentist Appointment', description: 'Regular checkup at Dr. Smith', date: '2023-09-16', time: '14:30', completed: false, priority: 'medium', category: 'Health' },
-  { id: 6, title: 'Book Club', description: 'Discuss "The Midnight Library"', date: '2023-09-22', time: '19:00', completed: false, priority: 'low', category: 'Personal' },
-  { id: 7, title: 'Car Service', description: 'Take car for oil change', date: '2023-09-17', time: '11:00', completed: false, priority: 'medium', category: 'Other' },
-  { id: 8, title: 'Pay Rent', description: 'Transfer rent to landlord', date: '2023-09-25', time: '12:00', completed: false, priority: 'high', category: 'Finance' },
-  { id: 9, title: 'Conference Call', description: 'With international clients', date: '2023-09-19', time: '13:00', completed: false, priority: 'high', category: 'Work' },
-  { id: 10, title: 'Grocery Shopping', description: 'Buy ingredients for dinner party', date: '2023-09-21', time: '17:30', completed: false, priority: 'medium', category: 'Personal' },
-  { id: 11, title: 'Yoga Class', description: 'Evening yoga session', date: '2023-09-23', time: '18:30', completed: false, priority: 'medium', category: 'Health' },
-  { id: 12, title: 'Movie Night', description: 'Watch new sci-fi movie', date: '2023-09-24', time: '20:00', completed: false, priority: 'low', category: 'Personal' },
-];
+type UiReminder = {
+  _id?: string;
+  title: string;
+  description?: string;
+  date?: string;
+  time?: string;
+  completed: boolean;
+  priority: 'low' | 'medium' | 'high';
+  category: string;
+};
 
 const RimixApp = () => {
-  const [reminders, setReminders] = useState(initialReminders);
+  const [reminders, setReminders] = useState<UiReminder[]>([]);
   const [currentPage, setCurrentPage] = useState(1);
   const [searchTerm, setSearchTerm] = useState('');
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [editingReminder, setEditingReminder] = useState(null);
+  const [editingReminder, setEditingReminder] = useState<UiReminder | null>(null);
   const [newReminder, setNewReminder] = useState({
     title: '',
     description: '',
@@ -45,13 +43,139 @@ const RimixApp = () => {
   const [timerRunning, setTimerRunning] = useState(false);
   const [activeTab, setActiveTab] = useState('reminders');
   const [darkMode, setDarkMode] = useState(false);
+  const [notificationsEnabled, setNotificationsEnabled] = useState(false);
+  const [crazyMode, setCrazyMode] = useState(true);
+  const [isRecording, setIsRecording] = useState(false);
+  const [hasCustomAlarm, setHasCustomAlarm] = useState(false);
+  const firedIdsRef = React.useRef<Set<string>>(new Set());
 
   const itemsPerPage = 10;
 
-  // Filter reminders based on search term
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const res = await fetch('/api/reminders');
+        const data = await res.json();
+        if (data?.ok) setReminders(data.data.items);
+      } catch (e) {
+      }
+    };
+    load();
+  }, []);
+
+  useEffect(() => {
+    if (!notificationsEnabled) return;
+    if (typeof window !== 'undefined' && 'Notification' in window) {
+      if (Notification.permission === 'default') {
+        Notification.requestPermission().catch(() => {});
+      }
+    }
+  }, [notificationsEnabled]);
+
+  const getDueDate = (r: UiReminder) => {
+    if (!r.date || !r.time) return null;
+    const [hh, mm] = r.time.split(':').map((v) => parseInt(v, 10));
+    const d = new Date(r.date);
+    d.setHours(hh || 0, mm || 0, 0, 0);
+    return isNaN(d.getTime()) ? null : d;
+  };
+
+  const playChime = () => {
+    try {
+      const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type = 'sine';
+      o.frequency.value = 880;
+      o.connect(g);
+      g.connect(ctx.destination);
+      g.gain.setValueAtTime(0.001, ctx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.5, ctx.currentTime + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 1.0);
+      o.start();
+      o.stop(ctx.currentTime + 1.05);
+      const o2 = ctx.createOscillator();
+      const g2 = ctx.createGain();
+      o2.type = 'square';
+      o2.frequency.value = 660;
+      o2.connect(g2);
+      g2.connect(ctx.destination);
+      g2.gain.setValueAtTime(0.001, ctx.currentTime + 0.2);
+      g2.gain.exponentialRampToValueAtTime(0.4, ctx.currentTime + 0.22);
+      g2.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 1.2);
+      o2.start(ctx.currentTime + 0.2);
+      o2.stop(ctx.currentTime + 1.25);
+    } catch {}
+  };
+
+  const triggerReminderEffects = (r: UiReminder) => {
+    if (hasCustomAlarm) {
+      alarmInstance.start(() => {
+        console.log('Reminder alarm dismissed by user:', r.title);
+      });
+    } else if (crazyMode) {
+      playChime();
+    }
+
+    if ('vibrate' in navigator) {
+      try { navigator.vibrate([200, 100, 200, 100, 300]); } catch {}
+    }
+    
+    try {
+      const utter = new SpeechSynthesisUtterance(`${r.title}. ${r.description || ''}`);
+      utter.rate = 1.0; utter.pitch = 1.0; utter.lang = 'en-US';
+      window.speechSynthesis.speak(utter);
+    } catch {}
+    
+    if (notificationsEnabled && 'Notification' in window) {
+      if (Notification.permission === 'granted') {
+        try {
+          new Notification('Reminder', {
+            body: `${r.title}${r.time ? ` • ${r.time}` : ''}`,
+            icon: '/favicon.ico'
+          });
+        } catch {}
+      }
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      alarmInstance.cleanup();
+    };
+  }, []);
+
+  useEffect(() => {
+    const checkReminders = () => {
+      const now = new Date();
+      reminders.forEach((r) => {
+        if (r.completed) return;
+        const due = getDueDate(r);
+        if (!due) return;
+        const rid = (r._id || r.title) as string;
+        
+        const timeDiff = Math.abs(now.getTime() - due.getTime());
+        if (timeDiff <= 5000 && !firedIdsRef.current.has(rid)) {
+          firedIdsRef.current.add(rid);
+          triggerReminderEffects(r);
+          
+          setTimeout(() => {
+            firedIdsRef.current.delete(rid);
+          }, 60000);
+        }
+      });
+    };
+
+    checkReminders();
+
+    const intervalId = setInterval(checkReminders, 5000);
+
+    return () => clearInterval(intervalId);
+  }, [reminders, hasCustomAlarm, crazyMode, notificationsEnabled]);
+
   const filteredReminders = reminders.filter(reminder =>
     reminder.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    reminder.description.toLowerCase().includes(searchTerm.toLowerCase())
+    (reminder.description || '').toLowerCase().includes(searchTerm.toLowerCase())
   );
 
   // Pagination logic
@@ -60,24 +184,36 @@ const RimixApp = () => {
   const currentReminders = filteredReminders.slice(startIndex, startIndex + itemsPerPage);
 
   // Handle page change
-  const handlePageChange = (page) => {
+  const handlePageChange = (page: number) => {
     if (page >= 1 && page <= totalPages) {
       setCurrentPage(page);
     }
   };
 
   // Handle reminder creation
-  const handleCreateReminder = () => {
-    if (editingReminder) {
-      // Update existing reminder
-      setReminders(reminders.map(r => 
-        r.id === editingReminder.id ? { ...editingReminder } : r
-      ));
-      setEditingReminder(null);
-    } else {
-      // Create new reminder
-      const newId = Math.max(...reminders.map(r => r.id)) + 1;
-      setReminders([...reminders, { ...newReminder, id: newId, completed: false }]);
+  const handleCreateReminder = async () => {
+    try {
+      if (editingReminder && editingReminder._id) {
+        const res = await fetch(`/api/reminders/${editingReminder._id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...newReminder }),
+        });
+        const data = await res.json();
+        if (data?.ok) {
+          setReminders(reminders.map(r => r._id === data.data._id ? data.data : r));
+        }
+        setEditingReminder(null);
+      } else {
+        const res = await fetch('/api/reminders', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...newReminder }),
+        });
+        const data = await res.json();
+        if (data?.ok) setReminders([data.data, ...reminders]);
+      }
+    } catch (e) {
     }
     setIsModalOpen(false);
     setNewReminder({
@@ -91,25 +227,37 @@ const RimixApp = () => {
   };
 
   // Handle reminder deletion
-  const handleDeleteReminder = (id) => {
-    setReminders(reminders.filter(reminder => reminder.id !== id));
+  const handleDeleteReminder = async (id: string) => {
+    try {
+      const res = await fetch(`/api/reminders/${id}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (data?.ok) setReminders(reminders.filter(reminder => reminder._id !== id));
+    } catch {}
   };
 
   // Handle reminder toggle (complete/incomplete)
-  const handleToggleReminder = (id) => {
-    setReminders(reminders.map(reminder =>
-      reminder.id === id ? { ...reminder, completed: !reminder.completed } : reminder
-    ));
+  const handleToggleReminder = async (id: string) => {
+    const target = reminders.find(r => r._id === id);
+    if (!target) return;
+    try {
+      const res = await fetch(`/api/reminders/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ completed: !target.completed })
+      });
+      const data = await res.json();
+      if (data?.ok) setReminders(reminders.map(r => r._id === id ? data.data : r));
+    } catch {}
   };
 
   // Handle edit reminder
-  const handleEditReminder = (reminder) => {
+  const handleEditReminder = (reminder: UiReminder) => {
     setEditingReminder(reminder);
     setNewReminder({
-      title: reminder.title,
-      description: reminder.description,
-      date: reminder.date,
-      time: reminder.time,
+      title: reminder.title || '',
+      description: reminder.description || '',
+      date: reminder.date || '',
+      time: reminder.time || '',
       priority: reminder.priority,
       category: reminder.category
     });
@@ -118,46 +266,45 @@ const RimixApp = () => {
 
   // Stopwatch effects
   useEffect(() => {
-    let interval = null;
+    let intervalId: ReturnType<typeof setInterval> | undefined;
     if (stopwatchRunning) {
-      interval = setInterval(() => {
+      intervalId = setInterval(() => {
         setStopwatchTime(prevTime => prevTime + 10);
       }, 10);
-    } else {
-      clearInterval(interval);
     }
-    return () => clearInterval(interval);
+    return () => {
+      if (intervalId) clearInterval(intervalId);
+    };
   }, [stopwatchRunning]);
 
   // Timer effects
   useEffect(() => {
-    let interval = null;
+    let intervalId: ReturnType<typeof setInterval> | undefined;
     if (timerRunning && timerTime > 0) {
-      interval = setInterval(() => {
+      intervalId = setInterval(() => {
         setTimerTime(prevTime => prevTime - 1);
       }, 1000);
     } else if (timerTime === 0) {
       setTimerRunning(false);
-      // Alarm would go off here
     }
-    return () => clearInterval(interval);
+    return () => {
+      if (intervalId) clearInterval(intervalId);
+    };
   }, [timerRunning, timerTime]);
 
-  // Format time functions
-  const formatStopwatchTime = (time) => {
+  const formatStopwatchTime = (time: number) => {
     const minutes = Math.floor(time / 60000);
     const seconds = Math.floor((time % 60000) / 1000);
     const milliseconds = Math.floor((time % 1000) / 10);
     return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}.${milliseconds.toString().padStart(2, '0')}`;
   };
 
-  const formatTimerTime = (time) => {
+  const formatTimerTime = (time: number) => {
     const minutes = Math.floor(time / 60);
     const seconds = time % 60;
     return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
   };
 
-  // Weather icons based on time of day
   const getWeatherIcon = () => {
     const hour = new Date().getHours();
     if (hour >= 6 && hour < 18) {
@@ -174,7 +321,7 @@ const RimixApp = () => {
         <div className="max-w-6xl mx-auto flex items-center justify-between">
           <div className="flex items-center space-x-3">
             <div className={`p-3 rounded-xl ${darkMode ? 'bg-gray-700' : 'bg-white bg-opacity-20'}`}>
-              <Clock size={32} className="text-white" />
+              <Clock size={32}  />
             </div>
             <h1 className="text-3xl font-bold text-white">Rimix</h1>
           </div>
@@ -198,6 +345,14 @@ const RimixApp = () => {
             >
               <Plus size={20} />
               <span>New Reminder</span>
+            </button>
+            <button 
+              onClick={() => setNotificationsEnabled((v) => !v)}
+              className={`py-2 px-3 rounded-lg flex items-center space-x-2 transition-all duration-200 shadow-md ${notificationsEnabled ? 'bg-green-500 text-white' : (darkMode ? 'bg-gray-700 text-gray-200' : 'bg-white text-gray-700')}`}
+              title="Enable desktop notifications"
+            >
+              {notificationsEnabled ? <Bell size={18} /> : <BellOff size={18} />}
+              <span className="hidden sm:inline">Notify</span>
             </button>
           </div>
         </div>
@@ -248,11 +403,11 @@ const RimixApp = () => {
             <div className={`rounded-2xl shadow-md overflow-hidden mb-8 ${darkMode ? 'bg-gray-800' : 'bg-white'}`}>
               {currentReminders.length > 0 ? (
                 currentReminders.map(reminder => (
-                  <div key={reminder.id} className={`border-b ${darkMode ? 'border-gray-700' : 'border-amber-100'} p-5 ${reminder.completed ? (darkMode ? 'bg-gray-700 bg-opacity-50' : 'bg-amber-50') : ''}`}>
+                  <div key={reminder._id || reminder.title} className={`border-b ${darkMode ? 'border-gray-700' : 'border-amber-100'} p-5 ${reminder.completed ? (darkMode ? 'bg-gray-700 bg-opacity-50' : 'bg-amber-50') : ''}`}>
                     <div className="flex items-center justify-between">
                       <div className="flex items-center space-x-4">
                         <button 
-                          onClick={() => handleToggleReminder(reminder.id)}
+                          onClick={() => handleToggleReminder(reminder._id as string)}
                           className={`p-2 rounded-full ${reminder.completed ? (darkMode ? 'bg-green-700' : 'bg-green-100 text-green-600') : (darkMode ? 'bg-gray-700' : 'bg-amber-100 text-amber-600')}`}
                         >
                           {reminder.completed ? <CheckSquare size={20} /> : <Square size={20} />}
@@ -292,7 +447,7 @@ const RimixApp = () => {
                           <Edit3 size={18} />
                         </button>
                         <button 
-                          onClick={() => handleDeleteReminder(reminder.id)}
+                          onClick={() => handleDeleteReminder(reminder._id as string)}
                           className={`p-2 rounded-full ${darkMode ? 'hover:bg-gray-700 text-red-400' : 'hover:bg-red-50 text-red-500'}`}
                         >
                           <Trash2 size={18} />
@@ -437,17 +592,94 @@ const RimixApp = () => {
             Attach Files
           </h2>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div className={`border-2 border-dashed rounded-2xl p-6 text-center transition-all duration-300 cursor-pointer hover:scale-105 ${darkMode ? 'border-amber-500 hover:bg-amber-900 hover:bg-opacity-20' : 'border-amber-400 hover:bg-amber-50'}`}>
-              <Mic className="mx-auto text-amber-500 mb-2" size={32} />
-              <p>Record Voice</p>
+            <div
+              onClick={async () => {
+                try {
+                  setIsRecording(true);
+                  const reminderData = await startVoiceRecognition();
+                  if (reminderData.title) {
+                    setNewReminder({
+                      title: reminderData.title,
+                      description: reminderData.description || '',
+                      date: reminderData.date || '',
+                      time: reminderData.time || '',
+                      priority: reminderData.priority || 'medium',
+                      category: reminderData.category || 'Personal'
+                    });
+                    setIsModalOpen(true);
+                  }
+                } catch (error) {
+                  alert('Failed to record voice: ' + error);
+                } finally {
+                  setIsRecording(false);
+                }
+              }}
+              className={`border-2 border-dashed rounded-2xl p-6 text-center transition-all duration-300 cursor-pointer hover:scale-105 ${
+                isRecording 
+                  ? 'border-red-500 bg-red-50' 
+                  : darkMode 
+                    ? 'border-amber-500 hover:bg-amber-900 hover:bg-opacity-20' 
+                    : 'border-amber-400 hover:bg-amber-50'
+              }`}
+            >
+              <Mic className={`mx-auto mb-2 ${isRecording ? 'text-red-500 animate-pulse' : 'text-amber-500'}`} size={32} />
+              <p>{isRecording ? 'Recording...' : 'Record Voice'}</p>
             </div>
-            <div className={`border-2 border-dashed rounded-2xl p-6 text-center transition-all duration-300 cursor-pointer hover:scale-105 ${darkMode ? 'border-amber-500 hover:bg-amber-900 hover:bg-opacity-20' : 'border-amber-400 hover:bg-amber-50'}`}>
+
+            <div
+              onClick={async () => {
+                const input = document.createElement('input');
+                input.type = 'file';
+                input.accept = '.txt,.doc,.docx,.pdf';
+                
+                input.onchange = async (e) => {
+                  const file = (e.target as HTMLInputElement).files?.[0];
+                  if (!file) return;
+
+                  try {
+                    const text = await extractTextFromFile(file);
+                    const reminderData = extractReminderFromText(text);
+                    
+                    setNewReminder({
+                      title: reminderData.title || file.name,
+                      description: reminderData.description || '',
+                      date: reminderData.date || '',
+                      time: reminderData.time || '',
+                      priority: reminderData.priority || 'medium',
+                      category: reminderData.category || 'Personal'
+                    });
+                    setIsModalOpen(true);
+                  } catch (error) {
+                    alert('Failed to process document: ' + error);
+                  }
+                };
+
+                input.click();
+              }}
+              className={`border-2 border-dashed rounded-2xl p-6 text-center transition-all duration-300 cursor-pointer hover:scale-105 ${darkMode ? 'border-amber-500 hover:bg-amber-900 hover:bg-opacity-20' : 'border-amber-400 hover:bg-amber-50'}`}
+            >
               <FileText className="mx-auto text-amber-500 mb-2" size={32} />
               <p>Upload Document</p>
             </div>
-            <div className={`border-2 border-dashed rounded-2xl p-6 text-center transition-all duration-300 cursor-pointer hover:scale-105 ${darkMode ? 'border-amber-500 hover:bg-amber-900 hover:bg-opacity-20' : 'border-amber-400 hover:bg-amber-50'}`}>
-              <Music className="mx-auto text-amber-500 mb-2" size={32} />
-              <p>Add Alarm Sound</p>
+
+            <div
+              onClick={() => {
+                setHasCustomAlarm(true);
+                // Update the triggerReminderEffects function to use the custom alarm
+                alarmInstance.start(() => {
+                  console.log('Alarm dismissed by user');
+                });
+              }}
+              className={`border-2 border-dashed rounded-2xl p-6 text-center transition-all duration-300 cursor-pointer hover:scale-105 ${
+                hasCustomAlarm
+                  ? 'border-green-500 bg-green-50'
+                  : darkMode
+                    ? 'border-amber-500 hover:bg-amber-900 hover:bg-opacity-20'
+                    : 'border-amber-400 hover:bg-amber-50'
+              }`}
+            >
+              <Music className={`mx-auto mb-2 ${hasCustomAlarm ? 'text-green-500' : 'text-amber-500'}`} size={32} />
+              <p>{hasCustomAlarm ? 'Custom Alarm Added' : 'Add Alarm Sound'}</p>
             </div>
           </div>
         </div>
@@ -477,7 +709,7 @@ const RimixApp = () => {
                   <label className={`block mb-1 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>Description</label>
                   <textarea
                     className={`w-full p-3 rounded-xl ${darkMode ? 'bg-gray-700 text-white border-gray-600' : 'bg-amber-50 border-amber-200'} border`}
-                    rows="3"
+                    rows={3}
                     value={newReminder.description}
                     onChange={(e) => setNewReminder({...newReminder, description: e.target.value})}
                   />
